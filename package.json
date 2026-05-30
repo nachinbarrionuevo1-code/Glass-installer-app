@@ -1,0 +1,15 @@
+{
+  "name": "civic-shower-screens-api",
+  "version": "1.0.0",
+  "description": "Backend API for Civic Shower Screens mobile app",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "devDependencies": {
+    "vercel": "^37.0.0"
+  }
+}
