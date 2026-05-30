@@ -1,1 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>Civic Shower Screens</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #f7f8fa; -webkit-tap-highlight-color: transparent; }
+    #root { min-height: 100vh; }
+    input, button, textarea, select { font-family: inherit; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script type="text/babel">
+    const { useState, useRef } = React;
 
+    // ─── THEME ────────────────────────────────────────────────────────────────────
+    const theme = {
+      colors: {
+        primary: "#1a1a2e",
+        accent: "#0f6e56",
+        accentLight: "#E1F5EE",
+        accentMid: "#1D9E75",
+        surface: "#ffffff",
+        surfaceAlt: "#f7f8fa",
+        border: "rgba(0,0,0,0.1)",
+        borderStrong: "rgba(0,0,0,0.2)",
+        textPrimary: "#111827",
+        textSecondary: "#6b7280",
+        textMuted: "#9ca3af",
+        danger: "#E24B4A",
+        dangerLight: "#FCEBEB",
+        warning: "#BA7517",
+        warningLight: "#FAEEDA",
+        success: "#1D9E75",
+        successLight: "#E1F5EE",
+        info: "#185FA5",
+        infoLight: "#E6F1FB",
+        gray: "#888780",
+        grayLight: "#F1EFE8",
+        debugBg: "#0f172a",
+        debugText: "#94a3b8",
+        debugOk: "#4ade80",
+        debugErr: "#f87171",
+        debugWarn: "#fbbf24",
+      },
+      spacing: { xs: 4, sm: 8, md: 16, lg: 24, xl: 32 },
+      radius: { sm: 6, md: 10, lg: 14, xl: 20 },
+      fontSize: { xs: 11, sm: 13, base: 15, md: 17, lg: 20, xl: 24, xxl: 30 },
+    };
+
+    // ─── DATA MODEL ───────────────────────────────────────────────────────────────
+    const createJob = (partial) => ({
+      id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      jobNumber: "",
+      address: "",
+      suburb: "",
+      contactName: "",
+      phone: "",
+      jobType: "",
+      selectedForAddressCopy: false,
+      selectedForMessage: false,
+      messageStatus: null,
+      jobStatus: "Pending",
+      notes: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...partial,
+    });
+
+    // ─── MESSAGE TEMPLATES ────────────────────────────────────────────────────────
+    const MESSAGE_TEMPLATES = {
+      "Morning Message": (j) =>
+        `Hi ${j.contactName}, this is Juan from Civic Shower Screens. We are scheduled to attend your property today for your ${j.jobType}. I will contact you again when I am on my way. Thank you.`,
+      "On My Way": (j) =>
+        `Hi ${j.contactName}, this is Juan from Civic Shower Screens. I am on my way to your property now. Thank you.`,
+      Arrived: (j) =>
+        `Hi ${j.contactName}, this is Juan from Civic Shower Screens. I have arrived at the property. Please let me know if access is required. Thank you.`,
+      Rescheduled: (j) =>
+        `Hi ${j.contactName}, this is Juan from Civic Shower Screens. Unfortunately, we need to reschedule your ${j.jobType}. Our office will contact you to arrange a new time. Sorry for the inconvenience.`,
+      Completed: (j) =>
+        `Hi ${j.contactName}, this is Juan from Civic Shower Screens. Your ${j.jobType} has now been completed. Thank you.`,
+    };
+
+    const JOB_STATUSES = ["Pending", "Message Sent", "Completed", "Not Ready", "Rescheduled"];
+
+    const STATUS_COLORS = {
+      Pending: { bg: theme.colors.warningLight, text: theme.colors.warning, dot: theme.colors.warning },
+      "Message Sent": { bg: theme.colors.infoLight, text: theme.colors.info, dot: theme.colors.info },
+      Completed: { bg: theme.colors.successLight, text: theme.colors.success, dot: theme.colors.success },
+      "Not Ready": { bg: theme.colors.grayLight, text: theme.colors.gray, dot: theme.colors.gray },
+      Rescheduled: { bg: theme.colors.dangerLight, text: theme.colors.danger, dot: theme.colors.danger },
+    };
+
+    // ─── STORAGE ──────────────────────────────────────────────────────────────────
+    const Storage = {
+      load: () => {
+        try { return JSON.parse(localStorage.getItem("civic_jobs") || "[]"); } catch { return []; }
+      },
+      save: (jobs) => {
+        try { localStorage.setItem("civic_jobs", JSON.stringify(jobs)); } catch {}
+      },
+      clear: () => { try { localStorage.removeItem("civic_jobs"); } catch {} },
+    };
+
+    // ─── IMAGE COMPRESSION ────────────────────────────────────────────────────────
+    // FIX: Compress images before sending. Phone cameras produce 4-8MB files.
+    // Large payloads time out on mobile networks and exceed API limits.
+    // We resize to max 1600px on the longest side and encode as JPEG at 85% quality.
+    // This brings a typical phone photo from ~5MB down to ~300-600KB.
+    const compressImage = (file) =>
+      new Promise((resolve, reject) => {
+        const MAX_PX = 1600;
+        const QUALITY = 0.85;
+
+        // FIX: Always use image/jpeg as fallback. On Android, file.type is sometimes
+        // empty string for camera captures, which causes the API to reject the request.
+        const mimeType = file.type && file.type.startsWith("image/") ? file.type : "image/jpeg";
+        const outputMime = mimeType === "image/png" ? "image/png" : "image/jpeg";
+
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("FileReader failed to read file"));
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onerror = () => reject(new Error("Image failed to decode — file may be corrupt or unsupported"));
+          img.onload = () => {
+            try {
+              let { width, height } = img;
+              const originalKB = Math.round(file.size / 1024);
+
+              // Scale down if either dimension exceeds MAX_PX
+              if (width > MAX_PX || height > MAX_PX) {
+                if (width > height) {
+                  height = Math.round((height * MAX_PX) / width);
+                  width = MAX_PX;
+                } else {
+                  width = Math.round((width * MAX_PX) / height);
+                  height = MAX_PX;
+                }
+              }
+
+              const canvas = document.createElement("canvas");
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img, 0, 0, width, height);
+
+              const dataUrl = canvas.toDataURL(outputMime, QUALITY);
+              const base64 = dataUrl.split(",")[1];
+              const compressedKB = Math.round((base64.length * 3) / 4 / 1024);
+
+              resolve({
+                base64,
+                mediaType: outputMime,
+                originalKB,
+                compressedKB,
+                width,
+                height,
+              });
+            } catch (canvasErr) {
+              reject(new Error(`Canvas error: ${canvasErr.message}`));
+            }
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+
+    // ─── BACKEND URL ─────────────────────────────────────────────────────────────
+    // Point this at your deployed Vercel backend.
+    // For local testing: "http://localhost:3000/api/scan"
+    // For production:    "https://your-app.vercel.app/api/scan"
+    //
+    // The app calls YOUR backend. Your backend holds the API key and calls Anthropic.
+    // The phone never talks to Anthropic directly.
+    const BACKEND_SCAN_URL = "https://your-app.vercel.app/api/scan";
+
+    // ─── SCANNER — calls your backend, not Anthropic directly ────────────────────
+    const scanJobSheets = async (imageDataList, addLog) => {
+      addLog("info", `OCR request: sending ${imageDataList.length} image(s) to backend`);
+      addLog("info", `Endpoint: ${BACKEND_SCAN_URL}`);
+
+      // Build the request body — just the compressed base64 images
+      const body = JSON.stringify({
+        images: imageDataList.map((img) => ({
+          base64: img.base64,
+          mediaType: img.mediaType,
+        })),
+      });
+      addLog("info", `Request body size: ${Math.round(body.length / 1024)} KB`);
+
+      let response;
+      try {
+        response = await fetch(BACKEND_SCAN_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+      } catch (networkErr) {
+        const msg = networkErr.message || String(networkErr);
+        addLog("error", `Network error — fetch to backend threw: ${msg}`);
+        throw new Error(
+          `Could not reach the backend server.\n\nURL tried: ${BACKEND_SCAN_URL}\n\nDetail: ${msg}\n\nCheck:\n• Is the backend deployed?\n• Is BACKEND_SCAN_URL set correctly in the app?\n• Is the phone online?`
+        );
+      }
+
+      addLog("info", `Backend response: HTTP ${response.status} ${response.statusText}`);
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonErr) {
+        addLog("error", `Backend response was not JSON: ${jsonErr.message}`);
+        throw new Error(`Backend returned non-JSON response (HTTP ${response.status}).\n\nThis usually means the backend URL is wrong or the function crashed before returning.`);
+      }
+
+      if (!response.ok) {
+        const detail = data.detail || data.error || JSON.stringify(data).slice(0, 300);
+        addLog("error", `Backend error ${response.status}: ${detail}`);
+        throw new Error(`Backend returned HTTP ${response.status}.\n\nError: ${data.error || "Unknown"}\nDetail: ${detail}`);
+      }
+
+      addLog("ok", `Backend returned ${data.count} job(s)`);
+
+      if (!Array.isArray(data.jobs)) {
+        addLog("error", `Backend response missing 'jobs' array: ${JSON.stringify(data).slice(0, 200)}`);
+        throw new Error("Backend response was missing the jobs array.");
+      }
+
+      return data.jobs;
+    };
+
+    // ─── DEBUG LOG PANEL ─────────────────────────────────────────────────────────
+    const DebugPanel = ({ logs, onClear }) => {
+      if (logs.length === 0) return null;
+      const colorMap = { ok: theme.colors.debugOk, error: theme.colors.debugErr, warn: theme.colors.debugWarn, info: theme.colors.debugText };
+      return (
+        <div style={{ background: theme.colors.debugBg, borderRadius: theme.radius.md, padding: 14, marginTop: 14, fontFamily: "monospace" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ color: theme.colors.debugText, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Debug Log</span>
+            <button onClick={onClear} style={{ background: "none", border: "none", color: theme.colors.debugText, cursor: "pointer", fontSize: 11 }}>Clear</button>
+          </div>
+          {logs.map((log, i) => (
+            <div key={i} style={{ fontSize: 11, color: colorMap[log.level] || theme.colors.debugText, lineHeight: 1.6, borderBottom: `1px solid rgba(255,255,255,0.05)`, paddingBottom: 4, marginBottom: 4, wordBreak: "break-all" }}>
+              <span style={{ opacity: 0.5 }}>[{log.time}] </span>
+              <span style={{ fontWeight: log.level === "error" ? 700 : 400 }}>{log.msg}</span>
+            </div>
+          ))}
+        </div>
+      );
+    };
+
+    // ─── SHARED UI COMPONENTS ─────────────────────────────────────────────────────
+    const NavBar = ({ title, onBack }) => (
+      <div style={{ background: theme.colors.primary, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 10 }}>
+        {onBack && (
+          <button onClick={onBack} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", padding: "4px 8px 4px 0", fontSize: 22, lineHeight: 1 }}>‹</button>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 8, background: theme.colors.accentMid, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: 14, color: "#fff" }}>◆</span>
+          </div>
+          <span style={{ color: "#fff", fontWeight: 600, fontSize: theme.fontSize.md }}>{title}</span>
+        </div>
+      </div>
+    );
+
+    const Badge = ({ label, status }) => {
+      const c = STATUS_COLORS[status] || STATUS_COLORS.Pending;
+      return (
+        <span style={{ background: c.bg, color: c.text, fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 20, display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: c.dot, display: "inline-block" }} />
+          {label}
+        </span>
+      );
+    };
+
+    const Btn = ({ children, onClick, variant = "primary", disabled, small, full, style: sx }) => {
+      const variants = {
+        primary: { background: theme.colors.accent, color: "#fff", border: "none" },
+        secondary: { background: theme.colors.surface, color: theme.colors.textPrimary, border: `1px solid ${theme.colors.border}` },
+        ghost: { background: "transparent", color: theme.colors.accent, border: `1px solid ${theme.colors.accent}` },
+        danger: { background: theme.colors.danger, color: "#fff", border: "none" },
+      };
+      return (
+        <button
+          onClick={onClick}
+          disabled={disabled}
+          style={{
+            ...variants[variant],
+            borderRadius: theme.radius.md,
+            padding: small ? "7px 14px" : "12px 20px",
+            fontSize: small ? 13 : 15,
+            fontWeight: 600,
+            cursor: disabled ? "not-allowed" : "pointer",
+            opacity: disabled ? 0.5 : 1,
+            width: full ? "100%" : "auto",
+            transition: "opacity 0.15s",
+            ...sx,
+          }}
+        >
+          {children}
+        </button>
+      );
+    };
+
+    const Card = ({ children, style: sx }) => (
+      <div style={{ background: theme.colors.surface, border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.lg, padding: "14px 16px", ...sx }}>
+        {children}
+      </div>
+    );
+
+    // ─── HOME SCREEN ──────────────────────────────────────────────────────────────
+    const HomeScreen = ({ jobs, setJobs, navigate }) => {
+      const [scanning, setScanning] = useState(false);
+      const [scanMsg, setScanMsg] = useState("");
+      const [error, setError] = useState("");
+      const [debugLogs, setDebugLogs] = useState([]);
+      const [showDebug, setShowDebug] = useState(false);
+      const fileRef = useRef();
+      const cameraRef = useRef();
+
+      const addLog = (level, msg) => {
+        const time = new Date().toLocaleTimeString("en-AU", { hour12: false });
+        setDebugLogs((prev) => [...prev, { level, msg, time }]);
+        // Also log to browser console for desktop devtools
+        if (level === "error") console.error(`[OCR] ${msg}`);
+        else console.log(`[OCR ${level}] ${msg}`);
+      };
+
+      const processFiles = async (files) => {
+        if (!files || files.length === 0) {
+          addLog("warn", "processFiles called with no files selected");
+          return;
+        }
+
+        setScanning(true);
+        setError("");
+        setScanMsg("Preparing images…");
+        setDebugLogs([]);
+
+        addLog("info", `── New scan started ──`);
+        addLog("info", `Files selected: ${files.length}`);
+
+        // Log each file
+        Array.from(files).forEach((f, i) => {
+          const kb = Math.round(f.size / 1024);
+          addLog("info", `File ${i + 1}: "${f.name}" | type: "${f.type || "(empty — will default to image/jpeg)"}" | size: ${kb} KB`);
+          if (kb > 5000) addLog("warn", `File ${i + 1} is large (${kb} KB). Compressing…`);
+        });
+
+        // Step 1: Compress images
+        let images;
+        try {
+          addLog("info", "Compressing images…");
+          images = await Promise.all(Array.from(files).map((f) => compressImage(f)));
+          images.forEach((img, i) => {
+            addLog("ok", `Image ${i + 1} compressed: ${img.originalKB} KB → ${img.compressedKB} KB | ${img.width}×${img.height}px | type: ${img.mediaType}`);
+          });
+        } catch (compressErr) {
+          const msg = compressErr.message || String(compressErr);
+          addLog("error", `Image compression failed: ${msg}`);
+          setError(`Could not read image file.\n\n${msg}`);
+          setScanning(false);
+          return;
+        }
+
+        // Step 2: Call OCR
+        setScanMsg(`Analysing ${images.length} photo${images.length > 1 ? "s" : ""}…`);
+        addLog("info", `Sending ${images.length} image(s) to OCR…`);
+
+        let extracted;
+        try {
+          extracted = await scanJobSheets(images, addLog);
+        } catch (ocrErr) {
+          const msg = ocrErr.message || String(ocrErr);
+          addLog("error", `OCR failed: ${msg}`);
+          setError(msg); // Show the REAL error, not the generic message
+          setScanning(false);
+          setShowDebug(true);
+          return;
+        }
+
+        // Step 3: Handle results
+        if (!extracted.length) {
+          addLog("warn", "OCR returned 0 jobs. Images may not be job sheets, or fields could not be read.");
+          setError("No job data found in the photos. Try a clearer, well-lit photo of the job sheet.");
+          setScanning(false);
+          return;
+        }
+
+        const newJobs = extracted.map((e) => createJob(e));
+        const updated = [...jobs, ...newJobs];
+        setJobs(updated);
+        Storage.save(updated);
+        addLog("ok", `Done. ${newJobs.length} job(s) saved to local storage.`);
+        setScanMsg(`✓ Found ${extracted.length} job${extracted.length > 1 ? "s" : ""}!`);
+        setScanning(false);
+      };
+
+      const clearJobs = () => {
+        setJobs([]); Storage.clear(); setScanMsg(""); setError(""); setDebugLogs([]);
+      };
+
+      return (
+        <div style={{ minHeight: "100vh", background: theme.colors.surfaceAlt }}>
+          <NavBar title="Civic Shower Screens" />
+          <div style={{ padding: 20, maxWidth: 480, margin: "0 auto" }}>
+
+            {/* Hero */}
+            <div style={{ background: theme.colors.primary, borderRadius: theme.radius.xl, padding: "28px 24px", marginBottom: 20, color: "#fff" }}>
+              <div style={{ fontSize: 28, fontWeight: 700, marginBottom: 4 }}>Good morning 👋</div>
+              <div style={{ opacity: 0.7, fontSize: 14 }}>
+                {jobs.length === 0
+                  ? "No jobs loaded yet. Scan your job sheets to start."
+                  : `${jobs.length} job${jobs.length > 1 ? "s" : ""} ready for today.`}
+              </div>
+            </div>
+
+            {/* Scan Buttons */}
+            <Card sx={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 11, color: theme.colors.textSecondary, textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>Scan Job Sheets</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                {/* FIX: capture="environment" targets the rear camera.
+                    multiple is removed from the camera input — on iOS, multiple+capture
+                    is ignored and the user can only take one photo at a time anyway.
+                    Upload input keeps multiple for gallery selection. */}
+                <input
+                  ref={cameraRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  style={{ display: "none" }}
+                  onChange={(e) => processFiles(e.target.files)}
+                />
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => processFiles(e.target.files)}
+                />
+                <button
+                  onClick={() => { cameraRef.current.value = ""; cameraRef.current.click(); }}
+                  disabled={scanning}
+                  style={{ background: theme.colors.accent, color: "#fff", border: "none", borderRadius: theme.radius.md, padding: "18px 12px", cursor: scanning ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 15, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, opacity: scanning ? 0.6 : 1 }}
+                >
+                  <span style={{ fontSize: 28 }}>📷</span>
+                  Take Photo
+                </button>
+                <button
+                  onClick={() => { fileRef.current.value = ""; fileRef.current.click(); }}
+                  disabled={scanning}
+                  style={{ background: theme.colors.surfaceAlt, color: theme.colors.textPrimary, border: `1.5px dashed ${theme.colors.border}`, borderRadius: theme.radius.md, padding: "18px 12px", cursor: scanning ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 15, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, opacity: scanning ? 0.6 : 1 }}
+                >
+                  <span style={{ fontSize: 28 }}>📁</span>
+                  Upload Photos
+                </button>
+              </div>
+
+              {/* Status messages */}
+              {scanning && (
+                <div style={{ marginTop: 14, background: theme.colors.accentLight, borderRadius: theme.radius.md, padding: "12px 14px", color: theme.colors.accent, fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
+                  {scanMsg}
+                </div>
+              )}
+              {!scanning && scanMsg && !error && (
+                <div style={{ marginTop: 14, background: theme.colors.successLight, borderRadius: theme.radius.md, padding: "12px 14px", color: theme.colors.success, fontWeight: 600, fontSize: 14 }}>
+                  {scanMsg}
+                </div>
+              )}
+              {error && (
+                <div style={{ marginTop: 14, background: theme.colors.dangerLight, borderRadius: theme.radius.md, padding: "12px 14px", color: theme.colors.danger, fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                  <span style={{ fontWeight: 700 }}>Error: </span>{error}
+                </div>
+              )}
+
+              {/* Debug toggle */}
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setShowDebug((v) => !v)}
+                  style={{ background: "none", border: "none", color: theme.colors.textMuted, cursor: "pointer", fontSize: 11, textDecoration: "underline" }}
+                >
+                  {showDebug ? "Hide" : "Show"} debug log {debugLogs.length > 0 ? `(${debugLogs.length})` : ""}
+                </button>
+              </div>
+              {showDebug && <DebugPanel logs={debugLogs} onClear={() => setDebugLogs([])} />}
+            </Card>
+
+            {/* Nav Grid */}
+            {jobs.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+                {[
+                  { label: "Addresses", icon: "📍", screen: "addresses", count: jobs.length },
+                  { label: "Messages", icon: "💬", screen: "messages", count: jobs.length },
+                  { label: "Job Status", icon: "✅", screen: "status", count: jobs.filter((j) => j.jobStatus === "Completed").length, suffix: " done" },
+                ].map((item) => (
+                  <button
+                    key={item.screen}
+                    onClick={() => navigate(item.screen)}
+                    style={{ background: theme.colors.surface, border: `1px solid ${theme.colors.border}`, borderRadius: theme.radius.lg, padding: "18px 14px", cursor: "pointer", textAlign: "left" }}
+                  >
+                    <div style={{ fontSize: 24, marginBottom: 8 }}>{item.icon}</div>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: theme.colors.textPrimary }}>{item.label}</div>
+                    <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 }}>
+                      {item.count}{item.suffix || " jobs"}
+                    </div>
+                  </button>
+                ))}
+                <button
+                  onClick={clearJobs}
+                  style={{ background: theme.colors.dangerLight, border: `1px solid ${theme.colors.danger}30`, borderRadius: theme.radius.lg, padding: "18px 14px", cursor: "pointer", textAlign: "left" }}
+                >
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>🗑️</div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: theme.colors.danger }}>Clear All</div>
+                  <div style={{ fontSize: 12, color: theme.colors.danger, marginTop: 2, opacity: 0.7 }}>Reset day</div>
+                </button>
+              </div>
+            )}
+
+            {/* Job summary strip */}
+            {jobs.length > 0 && (
+              <Card>
+                <div style={{ fontWeight: 600, fontSize: 11, color: theme.colors.textSecondary, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Today's Jobs</div>
+                {jobs.map((job, i) => (
+                  <div key={job.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < jobs.length - 1 ? `1px solid ${theme.colors.border}` : "none" }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{job.contactName || "Unknown"}</div>
+                      <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>{job.suburb || job.address || "No address"}</div>
+                    </div>
+                    <Badge label={job.jobStatus} status={job.jobStatus} />
+                  </div>
+                ))}
+              </Card>
+            )}
+          </div>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      );
+    };
+
+    // ─── ADDRESSES SCREEN ─────────────────────────────────────────────────────────
+    const AddressesScreen = ({ jobs, setJobs, navigate }) => {
+      const [editingId, setEditingId] = useState(null);
+      const [editVal, setEditVal] = useState("");
+      const [copied, setCopied] = useState(false);
+
+      const toggle = (id) => {
+        const updated = jobs.map((j) => j.id === id ? { ...j, selectedForAddressCopy: !j.selectedForAddressCopy } : j);
+        setJobs(updated); Storage.save(updated);
+      };
+      const selectAll = () => { const u = jobs.map((j) => ({ ...j, selectedForAddressCopy: true })); setJobs(u); Storage.save(u); };
+      const unselectAll = () => { const u = jobs.map((j) => ({ ...j, selectedForAddressCopy: false })); setJobs(u); Storage.save(u); };
+
+      const copySelected = () => {
+        const lines = jobs.filter((j) => j.selectedForAddressCopy).map((j) => [j.address, j.suburb].filter(Boolean).join(", ")).join("\n");
+        navigator.clipboard.writeText(lines).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+      };
+
+      const startEdit = (job) => { setEditingId(job.id); setEditVal([job.address, job.suburb].filter(Boolean).join(", ")); };
+      const saveEdit = (id) => {
+        const parts = editVal.split(",").map((s) => s.trim());
+        const updated = jobs.map((j) => j.id === id ? { ...j, address: parts[0] || "", suburb: parts.slice(1).join(", ") || "", updatedAt: new Date().toISOString() } : j);
+        setJobs(updated); Storage.save(updated); setEditingId(null);
+      };
+
+      const selected = jobs.filter((j) => j.selectedForAddressCopy).length;
+
+      return (
+        <div style={{ minHeight: "100vh", background: theme.colors.surfaceAlt }}>
+          <NavBar title="Addresses" onBack={() => navigate("home")} />
+          <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              <Btn small onClick={selectAll} variant="secondary">Select All</Btn>
+              <Btn small onClick={unselectAll} variant="secondary">Unselect All</Btn>
+              <Btn small onClick={copySelected} disabled={selected === 0} variant={copied ? "secondary" : "primary"}>
+                {copied ? "✓ Copied!" : `Copy ${selected > 0 ? selected : ""} Selected`}
+              </Btn>
+            </div>
+
+            {jobs.length === 0 ? (
+              <Card><div style={{ textAlign: "center", color: theme.colors.textMuted, padding: "32px 0" }}>No jobs loaded yet</div></Card>
+            ) : jobs.map((job) => (
+              <Card key={job.id} sx={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={job.selectedForAddressCopy}
+                    onChange={() => toggle(job.id)}
+                    style={{ marginTop: 3, width: 18, height: 18, accentColor: theme.colors.accent, cursor: "pointer" }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <span style={{ fontWeight: 700, fontSize: 15 }}>{job.contactName || "Unknown"}</span>
+                      {job.jobNumber && <span style={{ fontSize: 11, background: theme.colors.grayLight, color: theme.colors.gray, padding: "2px 8px", borderRadius: 20, fontWeight: 600 }}>#{job.jobNumber}</span>}
+                    </div>
+                    {editingId === job.id ? (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input
+                          value={editVal}
+                          onChange={(e) => setEditVal(e.target.value)}
+                          style={{ flex: 1, fontSize: 13, padding: "6px 10px", border: `1.5px solid ${theme.colors.accent}`, borderRadius: 8, outline: "none" }}
+                          autoFocus
+                        />
+                        <Btn small onClick={() => saveEdit(job.id)}>Save</Btn>
+                        <Btn small onClick={() => setEditingId(null)} variant="secondary">✕</Btn>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontSize: 14, color: theme.colors.textPrimary }}>{job.address || "—"}</div>
+                          <div style={{ fontSize: 13, color: theme.colors.textSecondary }}>{job.suburb}</div>
+                        </div>
+                        <button onClick={() => startEdit(job)} style={{ background: "none", border: "none", color: theme.colors.accent, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Edit</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── MESSAGES SCREEN ──────────────────────────────────────────────────────────
+    const MessagesScreen = ({ jobs, setJobs, navigate }) => {
+      const [activeTemplate, setActiveTemplate] = useState("Morning Message");
+
+      const toggle = (id) => {
+        const updated = jobs.map((j) => j.id === id ? { ...j, selectedForMessage: !j.selectedForMessage } : j);
+        setJobs(updated); Storage.save(updated);
+      };
+
+      const openMessage = (job) => {
+        const text = MESSAGE_TEMPLATES[activeTemplate](job);
+        const phone = job.phone.replace(/\D/g, "");
+        const smsUrl = `sms:${phone}?body=${encodeURIComponent(text)}`;
+        window.open(smsUrl, "_blank");
+        const updated = jobs.map((j) => j.id === job.id ? { ...j, messageStatus: activeTemplate, jobStatus: activeTemplate === "Completed" ? "Completed" : j.jobStatus === "Pending" ? "Message Sent" : j.jobStatus, updatedAt: new Date().toISOString() } : j);
+        setJobs(updated); Storage.save(updated);
+      };
+
+      return (
+        <div style={{ minHeight: "100vh", background: theme.colors.surfaceAlt }}>
+          <NavBar title="Messages" onBack={() => navigate("home")} />
+          <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
+
+            <Card sx={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 11, color: theme.colors.textSecondary, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Message Template</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {Object.keys(MESSAGE_TEMPLATES).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setActiveTemplate(t)}
+                    style={{
+                      padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      background: activeTemplate === t ? theme.colors.accent : theme.colors.surfaceAlt,
+                      color: activeTemplate === t ? "#fff" : theme.colors.textSecondary,
+                      border: activeTemplate === t ? "none" : `1px solid ${theme.colors.border}`,
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              {jobs.length > 0 && (
+                <div style={{ marginTop: 12, background: theme.colors.accentLight, borderRadius: 10, padding: "10px 12px", fontSize: 12, color: theme.colors.accent, lineHeight: 1.5 }}>
+                  <span style={{ fontWeight: 600 }}>Preview: </span>
+                  {MESSAGE_TEMPLATES[activeTemplate](jobs[0]).slice(0, 120)}…
+                </div>
+              )}
+            </Card>
+
+            {jobs.length === 0 ? (
+              <Card><div style={{ textAlign: "center", color: theme.colors.textMuted, padding: "32px 0" }}>No jobs loaded yet</div></Card>
+            ) : jobs.map((job) => (
+              <Card key={job.id} sx={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={job.selectedForMessage}
+                    onChange={() => toggle(job.id)}
+                    style={{ marginTop: 3, width: 18, height: 18, accentColor: theme.colors.accent, cursor: "pointer" }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 15 }}>{job.contactName || "Unknown"}</div>
+                        <div style={{ fontSize: 13, color: theme.colors.textSecondary }}>{job.phone || "No phone"}</div>
+                      </div>
+                      {job.messageStatus && (
+                        <span style={{ fontSize: 10, background: theme.colors.infoLight, color: theme.colors.info, padding: "2px 8px", borderRadius: 20, fontWeight: 600 }}>
+                          {job.messageStatus}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 10 }}>
+                      {[job.address, job.suburb].filter(Boolean).join(", ")} • {job.jobType || "Unknown job type"}
+                      {job.jobNumber ? ` • #${job.jobNumber}` : ""}
+                    </div>
+                    <Btn small onClick={() => openMessage(job)} disabled={!job.phone} full>
+                      💬 Send {activeTemplate}
+                    </Btn>
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── JOB STATUS SCREEN ────────────────────────────────────────────────────────
+    const StatusScreen = ({ jobs, setJobs, navigate }) => {
+      const [editingNote, setEditingNote] = useState(null);
+      const [noteVal, setNoteVal] = useState("");
+
+      const setStatus = (id, status) => {
+        const updated = jobs.map((j) => j.id === id ? { ...j, jobStatus: status, updatedAt: new Date().toISOString() } : j);
+        setJobs(updated); Storage.save(updated);
+      };
+
+      const saveNote = (id) => {
+        const updated = jobs.map((j) => j.id === id ? { ...j, notes: noteVal, updatedAt: new Date().toISOString() } : j);
+        setJobs(updated); Storage.save(updated); setEditingNote(null);
+      };
+
+      return (
+        <div style={{ minHeight: "100vh", background: theme.colors.surfaceAlt }}>
+          <NavBar title="Job Status" onBack={() => navigate("home")} />
+          <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
+            {jobs.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 16 }}>
+                {["Completed", "Pending"].map((s) => (
+                  <div key={s} style={{ background: STATUS_COLORS[s].bg, borderRadius: theme.radius.md, padding: "12px 14px" }}>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: STATUS_COLORS[s].text }}>{jobs.filter((j) => j.jobStatus === s).length}</div>
+                    <div style={{ fontSize: 12, color: STATUS_COLORS[s].text, opacity: 0.8 }}>{s}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {jobs.length === 0 ? (
+              <Card><div style={{ textAlign: "center", color: theme.colors.textMuted, padding: "32px 0" }}>No jobs loaded yet</div></Card>
+            ) : jobs.map((job) => (
+              <Card key={job.id} sx={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{job.contactName || "Unknown"}</div>
+                    <div style={{ fontSize: 12, color: theme.colors.textSecondary }}>{[job.address, job.suburb].filter(Boolean).join(", ")}</div>
+                    <div style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>{job.jobType}{job.jobNumber ? ` • #${job.jobNumber}` : ""}</div>
+                  </div>
+                  <Badge label={job.jobStatus} status={job.jobStatus} />
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                  {JOB_STATUSES.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setStatus(job.id, s)}
+                      style={{
+                        padding: "5px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                        background: job.jobStatus === s ? STATUS_COLORS[s].bg : "transparent",
+                        color: job.jobStatus === s ? STATUS_COLORS[s].text : theme.colors.textMuted,
+                        border: `1px solid ${job.jobStatus === s ? STATUS_COLORS[s].dot : theme.colors.border}`,
+                      }}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                {editingNote === job.id ? (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      value={noteVal}
+                      onChange={(e) => setNoteVal(e.target.value)}
+                      placeholder="Add a note…"
+                      style={{ flex: 1, fontSize: 13, padding: "7px 10px", border: `1.5px solid ${theme.colors.accent}`, borderRadius: 8, outline: "none" }}
+                      autoFocus
+                    />
+                    <Btn small onClick={() => saveNote(job.id)}>Save</Btn>
+                    <Btn small onClick={() => setEditingNote(null)} variant="secondary">✕</Btn>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 12, color: job.notes ? theme.colors.textSecondary : theme.colors.textMuted, fontStyle: job.notes ? "normal" : "italic" }}>
+                      {job.notes || "No notes"}
+                    </span>
+                    <button onClick={() => { setEditingNote(job.id); setNoteVal(job.notes || ""); }} style={{ background: "none", border: "none", color: theme.colors.accent, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+                      {job.notes ? "Edit" : "+ Note"}
+                    </button>
+                  </div>
+                )}
+              </Card>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── APP ROOT ─────────────────────────────────────────────────────────────────
+    function App() {
+      const [jobs, setJobs] = useState(() => Storage.load());
+      const [screen, setScreen] = useState("home");
+
+      const screenMap = {
+        home: <HomeScreen jobs={jobs} setJobs={setJobs} navigate={setScreen} />,
+        addresses: <AddressesScreen jobs={jobs} setJobs={setJobs} navigate={setScreen} />,
+        messages: <MessagesScreen jobs={jobs} setJobs={setJobs} navigate={setScreen} />,
+        status: <StatusScreen jobs={jobs} setJobs={setJobs} navigate={setScreen} />,
+      };
+
+      return (
+        <div style={{ fontFamily: "-apple-system, 'SF Pro Display', sans-serif", maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: theme.colors.surfaceAlt }}>
+          {screenMap[screen] || screenMap.home}
+        </div>
+      );
+    }
+
+    const _root = ReactDOM.createRoot(document.getElementById("root"));
+    _root.render(React.createElement(App));
+
+  </script>
+</body>
+</html>
