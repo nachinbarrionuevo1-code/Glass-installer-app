@@ -175,15 +175,10 @@
       });
 
     // ─── BACKEND URL ─────────────────────────────────────────────────────────────
-    // Point this at your deployed Vercel backend.
-    // For local testing: "http://localhost:3000/api/scan"
-    // For production:    "https://your-app.vercel.app/api/scan"
-    //
-    // The app calls YOUR backend. Your backend holds the API key and calls Anthropic.
-    // The phone never talks to Anthropic directly.
+    // Backend endpoint — relative path works on any domain (Vercel, localhost, etc.)
     const BACKEND_SCAN_URL = "/api/scan";
 
-    // ─── SCANNER — calls your backend, not Anthropic directly ────────────────────
+    // ─── SCANNER — sends images to /api/scan, which calls Gemini on the server ───
     const scanJobSheets = async (imageDataList, addLog) => {
       addLog("info", `OCR request: sending ${imageDataList.length} image(s) to backend`);
       addLog("info", `Endpoint: ${BACKEND_SCAN_URL}`);
