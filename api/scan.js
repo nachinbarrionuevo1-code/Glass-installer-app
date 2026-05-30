@@ -1,52 +1,35 @@
-
 /**
- * api/scan.js
- * Vercel Serverless Function — deployed at: https://your-app.vercel.app/api/scan
+ * api/scan.js  —  Vercel Serverless Function
  *
- * Receives compressed images from the mobile app, forwards them to the
- * Anthropic API using the server-side API key, and returns clean JSON.
+ * POST /api/scan
+ * Body:    { images: [{ base64: string, mediaType: string }] }
+ * Returns: { jobs: [...], count: N }
  *
- * The Anthropic API key is stored in Vercel's environment variables.
- * It is NEVER sent to the client. The client never sees it.
- *
- * Request:  POST /api/scan
- *           Content-Type: application/json
- *           Body: { images: [{ base64: string, mediaType: string }] }
- *
- * Response: 200 { jobs: [...] }
- *           400 { error: "..." }  — bad request (missing images, wrong format)
- *           500 { error: "..." }  — Anthropic API failure
+ * Uses Gemini Vision (gemini-1.5-flash).
+ * API key is read from process.env.GEMINI_API_KEY — set this in
+ * Vercel → Settings → Environment Variables.
+ * The key is never sent to the client.
  */
 
 export default async function handler(req, res) {
-  // ── CORS headers ────────────────────────────────────────────────────────────
-  // Allow requests from your deployed frontend URL.
-  // During development you can set this to * but lock it down in production.
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+
+  // ── CORS ────────────────────────────────────────────────────────────────────
+  res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  // Handle preflight (browser sends OPTIONS before POST)
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed. Use POST." });
   }
 
   // ── Validate request body ────────────────────────────────────────────────────
   const { images } = req.body || {};
-
   if (!images || !Array.isArray(images) || images.length === 0) {
-    return res.status(400).json({ error: "Request body must include an 'images' array." });
+    return res.status(400).json({ error: "Body must include a non-empty 'images' array." });
   }
-
   if (images.length > 10) {
     return res.status(400).json({ error: "Maximum 10 images per request." });
   }
-
   for (const img of images) {
     if (!img.base64 || typeof img.base64 !== "string") {
       return res.status(400).json({ error: "Each image must have a base64 string." });
@@ -54,119 +37,146 @@ export default async function handler(req, res) {
     if (!img.mediaType || !img.mediaType.startsWith("image/")) {
       return res.status(400).json({ error: `Invalid mediaType: "${img.mediaType}". Must start with "image/".` });
     }
-    // Rough size check: 1.5MB base64 ≈ ~1MB image — reject oversized images
     if (img.base64.length > 2_000_000) {
-      return res.status(400).json({ error: "Image too large. Please compress before uploading (max ~1.5MB base64)." });
+      return res.status(400).json({ error: "Image too large. Compress before uploading (max ~1.5 MB base64)." });
     }
   }
 
   // ── API key ──────────────────────────────────────────────────────────────────
-  // Set ANTHROPIC_API_KEY in Vercel dashboard → Settings → Environment Variables.
-  // It is injected at runtime and never exposed to the client.
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // Set GEMINI_API_KEY in Vercel: Settings → Environment Variables
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error("ANTHROPIC_API_KEY is not set in environment variables.");
-    return res.status(500).json({ error: "Server configuration error: API key not set." });
+    console.error("GEMINI_API_KEY is not set in Vercel environment variables.");
+    return res.status(500).json({ error: "Server configuration error: GEMINI_API_KEY not set." });
   }
 
-  // ── Build Anthropic request ──────────────────────────────────────────────────
-  const imageContent = images.map((img) => ({
-    type: "image",
-    source: { type: "base64", media_type: img.mediaType, data: img.base64 },
-  }));
+  // ── Prompt ───────────────────────────────────────────────────────────────────
+  const prompt = `You are analysing job sheet photos for a glass installation company called Civic Shower Screens.
+Extract ALL jobs visible across ALL provided images.
 
-  const prompt = `You are analysing job sheet photos for a glass installation company called Civic Shower Screens. Extract ALL jobs visible across all images.
+Respond ONLY with a valid JSON array — no markdown, no code fences, no explanation, no preamble.
 
-For each job found, return a JSON array. Respond ONLY with valid JSON — no markdown, no code fences, no explanation, no preamble.
-
-Each job object must have these exact keys:
-- jobNumber: string (job/work order number if visible, else "")
-- address: string (street address including number, e.g. "12 Smith Street")
-- suburb: string (suburb, city, or town)
-- contactName: string (customer full name)
-- phone: string (phone number as written on sheet)
-- jobType: string (type of work, e.g. "Shower Screen Installation", "Mirror Fitting", "Glass Balustrade", "Window Replacement")
-- notes: string (any other relevant information, measurements, access instructions, special requirements)
+Each job object must have exactly these keys (use "" for any field not visible):
+- jobNumber   : job or work order number
+- address     : street address including number (e.g. "12 Smith Street")
+- suburb      : suburb, city or town
+- contactName : customer full name
+- phone       : phone number as written on the sheet
+- jobType     : type of work (e.g. "Shower Screen Installation", "Mirror Fitting", "Glass Balustrade")
+- company     : company or builder name if visible, else ""
+- notes       : measurements, access instructions, or any other relevant detail
 
 Rules:
-- If a field is not visible or not present, use empty string ""
-- Do not invent or guess any field values
-- Extract EVERY job visible across ALL images
+- Never invent or guess field values
 - If the same job appears in multiple images, include it only once
+- Return [] if no recognisable job sheet data is found
 
-Return format (array, even for one job):
-[{"jobNumber":"...","address":"...","suburb":"...","contactName":"...","phone":"...","jobType":"...","notes":"..."}]
+Return format — array even for a single job:
+[{"jobNumber":"","address":"","suburb":"","contactName":"","phone":"","jobType":"","company":"","notes":""}]`;
 
-If no recognisable job sheet data is found, return: []`;
+  // ── Build Gemini request ─────────────────────────────────────────────────────
+  // Gemini expects images as inline_data parts followed by the text prompt
+  const parts = [
+    ...images.map((img) => ({
+      inline_data: { mime_type: img.mediaType, data: img.base64 },
+    })),
+    { text: prompt },
+  ];
 
-  // ── Call Anthropic ───────────────────────────────────────────────────────────
-  let anthropicResponse;
+  const GEMINI_MODEL = "gemini-1.5-flash";
+  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+  // ── Call Gemini ──────────────────────────────────────────────────────────────
+  let geminiRes;
   try {
-    anthropicResponse = await fetch("https://api.anthropic.com/v1/messages", {
+    geminiRes = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,                    // Key is on the server, never the client
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-opus-4-5",
-        max_tokens: 2048,
-        messages: [
-          {
-            role: "user",
-            content: [...imageContent, { type: "text", text: prompt }],
-          },
-        ],
+        contents: [{ parts }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
       }),
     });
-  } catch (networkErr) {
-    // This would mean the Vercel server itself can't reach Anthropic
-    console.error("Vercel → Anthropic network error:", networkErr);
+  } catch (netErr) {
+    console.error("Network error reaching Gemini:", netErr.message);
     return res.status(502).json({
-      error: "Backend could not reach Anthropic API. Check server network.",
-      detail: networkErr.message,
+      error: "Backend could not reach Gemini API.",
+      detail: netErr.message,
     });
   }
 
-  // ── Handle Anthropic errors ──────────────────────────────────────────────────
-  if (!anthropicResponse.ok) {
+  // ── Handle Gemini HTTP errors ────────────────────────────────────────────────
+  if (!geminiRes.ok) {
     let body = "";
-    try { body = await anthropicResponse.text(); } catch {}
-    console.error(`Anthropic API error ${anthropicResponse.status}:`, body);
+    try { body = await geminiRes.text(); } catch {}
+    console.error(`Gemini API error ${geminiRes.status}:`, body);
     return res.status(502).json({
-      error: `Anthropic API returned ${anthropicResponse.status}`,
+      error: `Gemini API returned HTTP ${geminiRes.status}`,
       detail: body.slice(0, 500),
     });
   }
 
-  let anthropicData;
+  let geminiData;
   try {
-    anthropicData = await anthropicResponse.json();
-  } catch (jsonErr) {
-    return res.status(502).json({ error: "Anthropic response was not valid JSON", detail: jsonErr.message });
+    geminiData = await geminiRes.json();
+  } catch (e) {
+    return res.status(502).json({ error: "Gemini response was not valid JSON.", detail: e.message });
   }
 
-  // ── Parse jobs from response ─────────────────────────────────────────────────
-  const rawText = (anthropicData.content || []).map((b) => b.text || "").join("").trim();
+  // ── Check for safety blocks ──────────────────────────────────────────────────
+  const blockReason = geminiData?.promptFeedback?.blockReason;
+  if (blockReason) {
+    return res.status(400).json({
+      error: `Gemini blocked the request: ${blockReason}`,
+      detail: "The image may have triggered a safety filter.",
+    });
+  }
 
-  // Strip any accidental markdown code fences
-  const cleaned = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+  const candidate = geminiData?.candidates?.[0];
+  if (!candidate) {
+    console.error("No candidates in Gemini response:", JSON.stringify(geminiData).slice(0, 300));
+    return res.status(502).json({ error: "Gemini returned no response candidates." });
+  }
+
+  // ── Extract raw text from response ───────────────────────────────────────────
+  // Gemini response shape: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
+  const rawText = (candidate?.content?.parts || [])
+    .map((p) => p.text || "")
+    .join("")
+    .trim();
+
+  if (!rawText) {
+    return res.status(502).json({
+      error: "Gemini returned an empty response.",
+      detail: `finishReason: ${candidate?.finishReason}`,
+    });
+  }
+
+  // ── Parse jobs JSON ──────────────────────────────────────────────────────────
+  // Strip any accidental markdown fences despite instructions
+  const cleaned = rawText
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
 
   let jobs;
   try {
     jobs = JSON.parse(cleaned);
   } catch (parseErr) {
-    console.error("Could not parse jobs from Anthropic response:", cleaned.slice(0, 500));
+    console.error("JSON parse failed. Raw output:", cleaned.slice(0, 500));
     return res.status(500).json({
-      error: "Could not parse job data from AI response",
+      error: "Could not parse job data from Gemini response.",
       detail: parseErr.message,
       raw: cleaned.slice(0, 300),
     });
   }
 
   if (!Array.isArray(jobs)) {
-    return res.status(500).json({ error: "AI response was not an array of jobs", raw: cleaned.slice(0, 300) });
+    return res.status(500).json({
+      error: "Gemini response was not a JSON array.",
+      raw: cleaned.slice(0, 300),
+    });
   }
 
   // ── Return clean result ──────────────────────────────────────────────────────
