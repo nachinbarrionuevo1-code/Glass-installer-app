@@ -181,7 +181,7 @@
     //
     // The app calls YOUR backend. Your backend holds the API key and calls Anthropic.
     // The phone never talks to Anthropic directly.
-    const BACKEND_SCAN_URL = "https://your-app.vercel.app/api/scan";
+    const BACKEND_SCAN_URL = "/api/scan";
 
     // ─── SCANNER — calls your backend, not Anthropic directly ────────────────────
     const scanJobSheets = async (imageDataList, addLog) => {
