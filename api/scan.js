@@ -5,12 +5,15 @@
  * Body:    { images: [{ base64: string, mediaType: string }] }
  * Returns: { jobs: [...], count: N }
  *
- * Sends images to Gemini Vision (gemini-1.5-flash) and returns
- * structured job data extracted from job sheet photos.
+ * Authentication: x-goog-api-key HTTP header
+ * This is the current method per Google's API reference (updated May 2026).
+ * Supports both new AQ... keys (issued by AI Studio from 2026) and
+ * legacy AIza... keys.
+ * Do NOT use ?key= query param — it conflicts with AQ... keys.
+ * Do NOT use Authorization: Bearer — that is for OAuth tokens, not API keys.
  *
- * Required env var: GEMINI_API_KEY
- * Set in Vercel → Settings → Environment Variables.
- * This key is NEVER sent to the browser.
+ * Key source: https://aistudio.google.com/app/apikey
+ * Set GEMINI_API_KEY in Vercel → Settings → Environment Variables.
  */
 
 export default async function handler(req, res) {
@@ -24,7 +27,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use POST." });
   }
 
-  // ── Validate request ──────────────────────────────────────────────────────────
+  // ── Validate request body ─────────────────────────────────────────────────────
   const { images } = req.body || {};
   if (!images || !Array.isArray(images) || images.length === 0) {
     return res.status(400).json({ error: "Body must include a non-empty 'images' array." });
@@ -37,26 +40,27 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Each image must have a base64 string." });
     }
     if (!img.mediaType || !img.mediaType.startsWith("image/")) {
-      return res.status(400).json({ error: `Invalid mediaType: "${img.mediaType}". Must start with "image/".` });
+      return res.status(400).json({ error: `Invalid mediaType: "${img.mediaType}". Must be image/jpeg or image/png.` });
     }
     if (img.base64.length > 2_000_000) {
-      return res.status(400).json({ error: "Image too large. Compress before uploading (max ~1.5 MB base64)." });
+      return res.status(400).json({ error: "Image too large. Max ~1.5 MB base64 after compression." });
     }
   }
 
-  // ── Gemini API key ────────────────────────────────────────────────────────────
-  // Add GEMINI_API_KEY in: Vercel Dashboard → Your Project → Settings → Environment Variables
-  // Get the key from: https://aistudio.google.com/app/apikey
+  // ── API key ───────────────────────────────────────────────────────────────────
+  // Set GEMINI_API_KEY in Vercel → Settings → Environment Variables.
+  // Get from: https://aistudio.google.com/app/apikey
+  // Accepts current AQ... keys and legacy AIza... keys — no format check.
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error("GEMINI_API_KEY is not set in Vercel environment variables.");
+    console.error("GEMINI_API_KEY is not set in environment variables.");
     return res.status(500).json({
       error: "Server configuration error: GEMINI_API_KEY not set.",
-      fix: "Add GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy."
+      fix: "Set GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy.",
     });
   }
 
-  // ── Extraction prompt ─────────────────────────────────────────────────────────
+  // ── Prompt ────────────────────────────────────────────────────────────────────
   const prompt = `You are analysing job sheet photos for a glass installation company called Civic Shower Screens.
 Extract ALL jobs visible across ALL provided images.
 
@@ -88,16 +92,24 @@ Return format (array, even for a single job):
     { text: prompt },
   ];
 
-  const GEMINI_MODEL = "gemini-1.5-flash";
-  const GEMINI_URL =
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  // gemini-2.0-flash: current model, free tier available, strong vision capability.
+  // gemini-1.5-flash was deprecated for new projects from April 29 2025.
+  const GEMINI_MODEL = "gemini-2.0-flash";
+  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   // ── Call Gemini ───────────────────────────────────────────────────────────────
+  // Auth: x-goog-api-key header — current method per Google API reference May 2026.
+  // Supports both AQ... (new AI Studio keys) and AIza... (legacy GCP keys).
+  // Do NOT use ?key= param — it causes "Multiple authentication credentials" errors
+  // with AQ... keys because the internal gateway also sends its own auth.
   let geminiRes;
   try {
     geminiRes = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
       body: JSON.stringify({
         contents: [{ parts }],
         generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
@@ -115,24 +127,35 @@ Return format (array, even for a single job):
   if (!geminiRes.ok) {
     let body = "";
     try { body = await geminiRes.text(); } catch {}
-    console.error(`Gemini API error ${geminiRes.status}:`, body);
+    console.error(`Gemini HTTP ${geminiRes.status}:`, body);
+
+    let hint = "";
+    if (geminiRes.status === 400 && body.includes("API_KEY_INVALID")) {
+      hint = " The key was rejected. Regenerate it at https://aistudio.google.com/app/apikey and update the GEMINI_API_KEY env var in Vercel.";
+    } else if (geminiRes.status === 400 && body.includes("Multiple authentication")) {
+      hint = " Multiple auth credentials conflict. This is fixed by using x-goog-api-key header instead of ?key= param — ensure the deployed code is the latest version.";
+    } else if (geminiRes.status === 403) {
+      hint = " Key exists but lacks permission. Ensure the Generative Language API is enabled in the associated Google Cloud project.";
+    } else if (geminiRes.status === 429) {
+      hint = " Rate limit hit. Wait a moment and retry.";
+    } else if (geminiRes.status === 404 && body.includes("not found")) {
+      hint = " Model not found. The model name may have changed — check https://ai.google.dev/gemini-api/docs/models for current model names.";
+    }
+
     return res.status(502).json({
-      error: `Gemini API returned HTTP ${geminiRes.status}`,
+      error: `Gemini API returned HTTP ${geminiRes.status}.${hint}`,
       detail: body.slice(0, 500),
     });
   }
 
+  // ── Parse Gemini response ─────────────────────────────────────────────────────
   let geminiData;
   try {
     geminiData = await geminiRes.json();
   } catch (e) {
-    return res.status(502).json({
-      error: "Gemini response was not valid JSON.",
-      detail: e.message,
-    });
+    return res.status(502).json({ error: "Gemini response was not valid JSON.", detail: e.message });
   }
 
-  // ── Check for safety blocks ───────────────────────────────────────────────────
   const blockReason = geminiData?.promptFeedback?.blockReason;
   if (blockReason) {
     return res.status(400).json({
@@ -143,29 +166,22 @@ Return format (array, even for a single job):
 
   const candidate = geminiData?.candidates?.[0];
   if (!candidate) {
-    console.error("No candidates in Gemini response:", JSON.stringify(geminiData).slice(0, 300));
+    console.error("No candidates:", JSON.stringify(geminiData).slice(0, 300));
     return res.status(502).json({
       error: "Gemini returned no response candidates.",
       detail: JSON.stringify(geminiData).slice(0, 300),
     });
   }
 
-  // ── Extract text ──────────────────────────────────────────────────────────────
-  // Gemini shape: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
-  const rawText = (candidate?.content?.parts || [])
-    .map((p) => p.text || "")
-    .join("")
-    .trim();
-
+  const rawText = (candidate?.content?.parts || []).map((p) => p.text || "").join("").trim();
   if (!rawText) {
     return res.status(502).json({
-      error: "Gemini returned an empty response.",
+      error: "Gemini returned empty text.",
       detail: `finishReason: ${candidate?.finishReason}`,
     });
   }
 
-  // ── Parse JSON ────────────────────────────────────────────────────────────────
-  // Strip any accidental markdown fences despite instructions
+  // ── Parse jobs JSON ───────────────────────────────────────────────────────────
   const cleaned = rawText
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -185,12 +201,8 @@ Return format (array, even for a single job):
   }
 
   if (!Array.isArray(jobs)) {
-    return res.status(500).json({
-      error: "Gemini response was not a JSON array.",
-      raw: cleaned.slice(0, 300),
-    });
+    return res.status(500).json({ error: "Gemini response was not a JSON array.", raw: cleaned.slice(0, 300) });
   }
 
-  // ── Return clean result ───────────────────────────────────────────────────────
   return res.status(200).json({ jobs, count: jobs.length });
 }
