@@ -5,15 +5,17 @@
  * Body:    { images: [{ base64: string, mediaType: string }] }
  * Returns: { jobs: [...], count: N }
  *
- * Authentication: x-goog-api-key HTTP header
- * This is the current method per Google's API reference (updated May 2026).
- * Supports both new AQ... keys (issued by AI Studio from 2026) and
- * legacy AIza... keys.
- * Do NOT use ?key= query param — it conflicts with AQ... keys.
- * Do NOT use Authorization: Bearer — that is for OAuth tokens, not API keys.
+ * Uses Gemini Vision (gemini-2.5-flash-lite) — free tier, no billing required.
+ * Free tier limits: 15 RPM / 1,000 RPD — plenty for 1–20 photos/day.
  *
- * Key source: https://aistudio.google.com/app/apikey
- * Set GEMINI_API_KEY in Vercel → Settings → Environment Variables.
+ * Auth: x-goog-api-key header (current method for AQ... keys from AI Studio).
+ * Key:  https://aistudio.google.com/app/apikey
+ * Env:  GEMINI_API_KEY in Vercel → Settings → Environment Variables
+ *
+ * Model history:
+ *   gemini-1.5-flash   — deprecated Apr 2025
+ *   gemini-2.0-flash   — deprecated Feb 2026, shut down Mar 3 2026, quota = 0
+ *   gemini-2.5-flash-lite — current stable free-tier model as of Jun 2026
  */
 
 export default async function handler(req, res) {
@@ -48,12 +50,11 @@ export default async function handler(req, res) {
   }
 
   // ── API key ───────────────────────────────────────────────────────────────────
-  // Set GEMINI_API_KEY in Vercel → Settings → Environment Variables.
-  // Get from: https://aistudio.google.com/app/apikey
-  // Accepts current AQ... keys and legacy AIza... keys — no format check.
+  // Get key from: https://aistudio.google.com/app/apikey
+  // Set GEMINI_API_KEY in Vercel → Settings → Environment Variables
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error("GEMINI_API_KEY is not set in environment variables.");
+    console.error("GEMINI_API_KEY is not set.");
     return res.status(500).json({
       error: "Server configuration error: GEMINI_API_KEY not set.",
       fix: "Set GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy.",
@@ -92,16 +93,15 @@ Return format (array, even for a single job):
     { text: prompt },
   ];
 
-  // gemini-2.0-flash: current model, free tier available, strong vision capability.
-  // gemini-1.5-flash was deprecated for new projects from April 29 2025.
-  const GEMINI_MODEL = "gemini-2.0-flash";
+  // gemini-2.5-flash-lite: current stable free-tier model as of June 2026.
+  // Free tier: 15 RPM, 1,000 RPD — comfortably handles 1–20 photos/day.
+  // gemini-2.0-flash was shut down March 3 2026 — its quota is 0, do not use it.
+  const GEMINI_MODEL = "gemini-2.5-flash-lite";
   const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   // ── Call Gemini ───────────────────────────────────────────────────────────────
-  // Auth: x-goog-api-key header — current method per Google API reference May 2026.
-  // Supports both AQ... (new AI Studio keys) and AIza... (legacy GCP keys).
-  // Do NOT use ?key= param — it causes "Multiple authentication credentials" errors
-  // with AQ... keys because the internal gateway also sends its own auth.
+  // Auth: x-goog-api-key header — required for AQ... keys issued by AI Studio from 2026.
+  // Do NOT use ?key= query param — it conflicts with AQ... keys.
   let geminiRes;
   try {
     geminiRes = await fetch(GEMINI_URL, {
@@ -130,16 +130,18 @@ Return format (array, even for a single job):
     console.error(`Gemini HTTP ${geminiRes.status}:`, body);
 
     let hint = "";
-    if (geminiRes.status === 400 && body.includes("API_KEY_INVALID")) {
-      hint = " The key was rejected. Regenerate it at https://aistudio.google.com/app/apikey and update the GEMINI_API_KEY env var in Vercel.";
-    } else if (geminiRes.status === 400 && body.includes("Multiple authentication")) {
-      hint = " Multiple auth credentials conflict. This is fixed by using x-goog-api-key header instead of ?key= param — ensure the deployed code is the latest version.";
+    if (geminiRes.status === 429) {
+      if (body.includes("limit: 0") || body.includes("limit:0")) {
+        hint = " Quota is 0 — the model may be deprecated. Current free-tier model is gemini-2.5-flash-lite.";
+      } else {
+        hint = " Rate limit hit. Free tier allows 15 RPM / 1,000 RPD. Wait a moment and retry.";
+      }
+    } else if (geminiRes.status === 400 && body.includes("API_KEY_INVALID")) {
+      hint = " Key rejected. Regenerate at https://aistudio.google.com/app/apikey and update GEMINI_API_KEY in Vercel.";
+    } else if (geminiRes.status === 404) {
+      hint = " Model not found. Check https://ai.google.dev/gemini-api/docs/models for current model names.";
     } else if (geminiRes.status === 403) {
-      hint = " Key exists but lacks permission. Ensure the Generative Language API is enabled in the associated Google Cloud project.";
-    } else if (geminiRes.status === 429) {
-      hint = " Rate limit hit. Wait a moment and retry.";
-    } else if (geminiRes.status === 404 && body.includes("not found")) {
-      hint = " Model not found. The model name may have changed — check https://ai.google.dev/gemini-api/docs/models for current model names.";
+      hint = " Key lacks permission. Ensure the Generative Language API is enabled in the Google Cloud project.";
     }
 
     return res.status(502).json({
@@ -173,6 +175,7 @@ Return format (array, even for a single job):
     });
   }
 
+  // Gemini response shape: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
   const rawText = (candidate?.content?.parts || []).map((p) => p.text || "").join("").trim();
   if (!rawText) {
     return res.status(502).json({
